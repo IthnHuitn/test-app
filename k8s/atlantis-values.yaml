@@ -1,0 +1,19 @@
+# atlantis-values.yaml
+orgAllowlist: github.com/YOUR_ORG/*
+github:
+  user: YOUR_GITHUB_USER
+  token: YOUR_GITHUB_TOKEN
+  secret: YOUR_WEBHOOK_SECRET
+
+ingress:
+  enabled: true
+  className: nginx
+  host: atlantis.example.com
+
+environment:
+  ATLANTIS_ATLANTIS_URL: "http://atlantis.example.com"
+
+service:
+  type: NodePort
+  port: 80
+  nodePort: 30090
