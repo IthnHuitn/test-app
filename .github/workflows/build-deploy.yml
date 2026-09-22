@@ -18,6 +18,7 @@ on:
       - 'html/**'
       - 'k8s/**'
   workflow_dispatch:
+
 env:
   REGISTRY: cr.yandex
   REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
@@ -27,8 +28,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
-    
+      image_tag: ${{ steps.tag.outputs.value }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,6 +56,15 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Compute single image tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=sha-$(echo "${GITHUB_SHA}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -70,13 +80,15 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
 
       - name: Configure kubeconfig
         run: |
@@ -84,31 +96,37 @@ jobs:
           echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
 
-      - name: Create registry secret
+      - name: Ensure imagePullSecret
         env:
-          SA_KEY: ${{ secrets.YC_SA_KEY }}
+          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
         run: |
-          echo "$SA_KEY" > /tmp/sa-key.json
           kubectl create secret docker-registry yc-registry-secret \
             --docker-server=cr.yandex \
             --docker-username=json_key \
-            --docker-password="$(cat /tmp/sa-key.json)" \
-            --docker-email=test@test.com \
+            --docker-password="$YC_SA_KEY" \
+            --docker-email=evilmc@list.ru \
+            --namespace default \
             --dry-run=client -o yaml | kubectl apply -f -
-          rm /tmp/sa-key.json
 
       - name: Deploy to Kubernetes
         env:
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
-  #        IMAGE_TAG: sha-${GITHUB_SHA::7}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          LB_PUBLIC_IP: ${{ secrets.LB_PUBLIC_IP }}
         run: |
-          export IMAGE_TAG="sha-${GITHUB_SHA:0:7}"
-          envsubst '${YC_REGISTRY_ID} ${IMAGE_NAME} ${IMAGE_TAG}' \
-            < k8s/deployment.yaml | kubectl apply -f -
+          echo "Deploying image: cr.yandex/$YC_REGISTRY_ID/$IMAGE_NAME:$IMAGE_TAG"
+
+          envsubst '${YC_REGISTRY_ID} ${IMAGE_NAME} ${IMAGE_TAG}' < k8s/deployment.yaml | kubectl apply -f -
+
           kubectl apply -f k8s/service.yaml
-          kubectl apply -f k8s/ingress.yaml
+
+          envsubst '${LB_PUBLIC_IP}' < k8s/ingress.yaml | kubectl apply -f -
+
+          echo "Waiting for rollout..."
           kubectl rollout status deployment/test-app -n default --timeout=300s
+
+          echo "Current Pods:"
           kubectl get pods -l app=test-app -n default
 
       - name: Verify deployment
